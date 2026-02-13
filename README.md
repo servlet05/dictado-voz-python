@@ -28,7 +28,7 @@ cd dictado-voz-python
 
 bash
 
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate  # Linux/Mac
 venv\Scripts\activate     # Windows
 ```
@@ -44,7 +44,7 @@ pip install -r requirements.txt
 
 bash
 
-python app.py
+python3 app.py
 ```
 ```
     Abrir navegador en http://localhost:5000
