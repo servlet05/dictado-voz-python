@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.wav
+*.mp3
+.DS_Store
+instance/
+.webassets-cache
