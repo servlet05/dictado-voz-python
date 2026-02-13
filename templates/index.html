@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dictado por Voz</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Dictado por Voz</h1>
+        
+        <div class="dictado-container">
+            <div class="control-panel">
+                <button id="btnGrabar" class="btn-grabar">
+                    <span class="icon">🎤</span>
+                    Iniciar Grabación
+                </button>
+                <button id="btnDetener" class="btn-detener" disabled>
+                    <span class="icon">⏹️</span>
+                    Detener
+                </button>
+            </div>
+            
+            <div class="estado" id="estado">
+                Listo para grabar
+            </div>
+            
+            <div class="texto-container">
+                <textarea id="textoDictado" placeholder="Aquí aparecerá el texto dictado..." readonly></textarea>
+            </div>
+            
+            <div class="acciones" id="acciones" style="display: none;">
+                <button id="btnCopiar" class="btn-copiar">
+                    📋 Copiar
+                </button>
+                <button id="btnDescargarTxt" class="btn-descargar">
+                    📄 Descargar TXT
+                </button>
+                <button id="btnDescargarDocx" class="btn-descargar">
+                    📝 Descargar Word
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Variables globales
+        let mediaRecorder;
+        let audioChunks = [];
+        let textoCompleto = '';
+
+        // Elementos del DOM
+        const btnGrabar = document.getElementById('btnGrabar');
+        const btnDetener = document.getElementById('btnDetener');
+        const estado = document.getElementById('estado');
+        const textoDictado = document.getElementById('textoDictado');
+        const acciones = document.getElementById('acciones');
+
+        // Función para iniciar grabación
+        async function iniciarGrabacion() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 16000,
+                        sampleSize: 16
+                    } 
+                });
+                
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = event => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    await enviarAudio(audioBlob);
+                    
+                    // Detener todas las pistas de audio
+                    stream.getTracks().forEach(track => track.stop());
+                };
+
+                mediaRecorder.start();
+                btnGrabar.disabled = true;
+                btnDetener.disabled = false;
+                estado.textContent = '🎙️ Grabando...';
+                estado.className = 'estado grabando';
+                
+            } catch (error) {
+                console.error('Error al acceder al micrófono:', error);
+                estado.textContent = '❌ Error: No se pudo acceder al micrófono';
+                estado.className = 'estado error';
+            }
+        }
+
+        // Función para enviar audio al servidor con conversión a WAV
+        async function enviarAudio(audioBlob) {
+            estado.textContent = '🔄 Procesando audio...';
+            
+            try {
+                // Convertir el blob a formato WAV correcto
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const arrayBuffer = await audioBlob.arrayBuffer();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                
+                // Crear WAV correctamente formateado
+                const wavBlob = await audioBufferToWav(audioBuffer);
+                
+                const formData = new FormData();
+                formData.append('audio', wavBlob, 'grabacion.wav');
+
+                const response = await fetch('/transcribir', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.exito) {
+                    if (textoCompleto) {
+                        textoCompleto += ' ' + data.texto;
+                    } else {
+                        textoCompleto = data.texto;
+                    }
+                    
+                    textoDictado.value = textoCompleto;
+                    textoDictado.readOnly = false;
+                    acciones.style.display = 'flex';
+                    estado.textContent = '✅ Transcripción completada';
+                    estado.className = 'estado exito';
+                } else {
+                    throw new Error(data.error || 'Error en la transcripción');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                estado.textContent = '❌ Error al transcribir: ' + error.message;
+                estado.className = 'estado error';
+            }
+        }
+
+        // Función para convertir AudioBuffer a WAV (PCM 16-bit)
+        function audioBufferToWav(buffer) {
+            return new Promise((resolve) => {
+                const numChannels = buffer.numberOfChannels;
+                const sampleRate = buffer.sampleRate;
+                const format = 1; // PCM
+                const bitDepth = 16;
+                
+                let bytesPerSample = bitDepth / 8;
+                let blockAlign = numChannels * bytesPerSample;
+                
+                let audioData;
+                if (numChannels === 2) {
+                    audioData = interleave(buffer.getChannelData(0), buffer.getChannelData(1));
+                } else {
+                    audioData = buffer.getChannelData(0);
+                }
+                
+                // Convertir a PCM 16-bit
+                const pcmData = new Int16Array(audioData.length);
+                for (let i = 0; i < audioData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, audioData[i]));
+                    pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+                
+                // Crear cabecera WAV
+                const dataSize = pcmData.length * bytesPerSample;
+                const headerSize = 44;
+                const totalSize = headerSize + dataSize;
+                const buffer_array = new ArrayBuffer(totalSize);
+                const view = new DataView(buffer_array);
+                
+                // "RIFF"
+                writeString(view, 0, 'RIFF');
+                view.setUint32(4, totalSize - 8, true);
+                writeString(view, 8, 'WAVE');
+                
+                // "fmt "
+                writeString(view, 12, 'fmt ');
+                view.setUint32(16, 16, true);
+                view.setUint16(20, format, true);
+                view.setUint16(22, numChannels, true);
+                view.setUint32(24, sampleRate, true);
+                view.setUint32(28, sampleRate * blockAlign, true);
+                view.setUint16(32, blockAlign, true);
+                view.setUint16(34, bitDepth, true);
+                
+                // "data"
+                writeString(view, 36, 'data');
+                view.setUint32(40, dataSize, true);
+                
+                // Datos de audio
+                const offset = 44;
+                for (let i = 0; i < pcmData.length; i++) {
+                    view.setInt16(offset + i * bytesPerSample, pcmData[i], true);
+                }
+                
+                resolve(new Blob([buffer_array], { type: 'audio/wav' }));
+            });
+        }
+
+        // Función auxiliar para escribir strings en DataView
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        // Función para intercalar canales estéreo
+        function interleave(left, right) {
+            const length = left.length + right.length;
+            const result = new Float32Array(length);
+            let index = 0;
+            let inputIndex = 0;
+            
+            while (index < length) {
+                result[index++] = left[inputIndex];
+                result[index++] = right[inputIndex];
+                inputIndex++;
+            }
+            return result;
+        }
+
+        // Función para descargar archivo
+        async function descargarArchivo(tipo) {
+            const endpoint = tipo === 'txt' ? '/descargar/txt' : '/descargar/docx';
+            
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ texto: textoCompleto })
+                });
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = tipo === 'txt' ? 'dictado.txt' : 'dictado.docx';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+                
+                estado.textContent = '✅ Archivo descargado';
+                estado.className = 'estado exito';
+            } catch (error) {
+                console.error('Error al descargar:', error);
+                estado.textContent = '❌ Error al descargar el archivo';
+                estado.className = 'estado error';
+            }
+        }
+
+        // Event Listeners
+        btnGrabar.addEventListener('click', iniciarGrabacion);
+        
+        btnDetener.addEventListener('click', () => {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+                btnGrabar.disabled = false;
+                btnDetener.disabled = true;
+            }
+        });
+
+        // Botón copiar
+        document.getElementById('btnCopiar').addEventListener('click', () => {
+            textoDictado.select();
+            document.execCommand('copy');
+            estado.textContent = '📋 Texto copiado al portapapeles';
+            estado.className = 'estado exito';
+        });
+
+        // Botones de descarga
+        document.getElementById('btnDescargarTxt').addEventListener('click', () => descargarArchivo('txt'));
+        document.getElementById('btnDescargarDocx').addEventListener('click', () => descargarArchivo('docx'));
+
+        // Permitir edición manual del texto
+        textoDictado.addEventListener('input', (e) => {
+            textoCompleto = e.target.value;
+        });
+    </script>
+</body>
+</html>
